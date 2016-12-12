@@ -1,0 +1,612 @@
+/**
+ *
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ *
+ * 
+ */
+
+metadata 
+{
+    definition (name: "Danfoss Living Connect LC-13 Thermostat", namespace: "BechmannCom", author: "René Bechmann") 
+    {
+    	// This handler has commands
+        capability "Actuator"
+        
+        // This handler has attributes
+        capability "Sensor"
+        
+		// Thermostat capability        
+        capability "Thermostat"
+
+		command "setHeatingSetpoint"
+        command "setCoolingSetpoint"
+        command "off"
+        command "heat"
+        command "emergencyHeat"
+        command "cool"
+        command "setThermostatMode"
+        command "fanOn"
+        command "fanAuto"
+        command "fanCirculate"
+        command "setThermostatFanMode"
+        command "auto"
+        
+        attribute "temperature", "string"
+        attribute "heatingSetpoint", "string"
+        attribute "coolingSetpoint", "string"
+        attribute "thermostatSetpoint", "string"
+        attribute "thermostatMode", "string"
+        attribute "thermostatFanMode", "string"
+        attribute "thermostatOperatingState", "string"
+
+		// Battery capability        
+        capability "Battery"
+
+		attribute "battery", "string"
+
+		// Danfoss thermostat fingerprint "NQ-500-EU"
+		// https://store.northq.com/products/danfoss-living-connect-nq-500-eu
+		// https://cdn.shopify.com/s/files/1/1238/1276/files/Danfoss_Living_Connect_Specifications.pdf?583524900071384087
+		// Raw device data: zw:S type:0804 mfr:0002 prod:0005 model:0003 ver:2.51 zwv:2.67 lib:06 cc:80,46,81,72,8F,75,43,86,84 ccOut:46,81,8F
+		// http://products.z-wavealliance.org/products/932
+		// Supported classes: http://products.z-wavealliance.org/products/932/classes
+		// Product web site:  Product Website: http://heating.consumers.danfoss.com/xxTypex/585379.html
+
+		fingerprint type: "0804", mfr: "0002", prod: "0005", model: "0003", cc: "80,46,81,72,8F,75,43,86,84", ccOut:"46,81,8F"
+
+		//fingerprint deviceId: "0x0804"
+        //fingerprint inClusters: "0x80, 0x46, 0x81, 0x72, 0x8F, 0x75, 0x43, 0x86, 0x84"
+    }
+
+    simulator {}
+
+    tiles (scale: 2)
+    {
+        multiAttributeTile(name:"thermostatFull", type:"thermostat", width:6, height:4) 
+        {
+            tileAttribute("device.heatingSetpoint", key: "PRIMARY_CONTROL") 
+            {
+                attributeState("default", label:'${currentValue}°', unit:"",
+                      backgroundColors:[
+                           [value: 0, color: "#ededed"],
+                           [value: 4, color: "#153591"],
+                           [value: 16, color: "#178998"],
+                           [value: 18, color: "#199f5c"],
+                           [value: 20, color: "#2da71c"],
+                           [value: 21, color: "#5baa1d"],
+                           [value: 22, color: "#8aae1e"],
+                           [value: 23, color: "#b1a81f"],
+                           [value: 24, color: "#b57d20"],
+                           [value: 26, color: "#b85122"],
+                           [value: 28, color: "#bc2323"]])
+            }
+            
+            tileAttribute("device.nextHeatingSetpoint", key: "SECONDARY_CONTROL") 
+            {
+                attributeState("default", label:'${currentValue}° next', unit:"")
+            }
+        }
+        
+        controlTile("nextHeatingSetpointSlider", "device.nextHeatingSetpoint", "slider", height: 1, width: 6, inactiveLabel: false, range:"(4..28)") 
+        {
+            state "default", action: "setHeatingSetpoint", backgroundColor:"#d04e00"
+        }
+        
+        valueTile("batteryTile", "device.battery", inactiveLabel: true, decoration: "flat", width: 1, height: 1) 
+        {
+            tileAttribute ("device.battery", key: "PRIMARY_CONTROL")
+            {
+                state "default", label:'${currentValue}% battery', unit:"%"
+            }
+        }
+
+        main "thermostatFull"
+        details(["thermostatFull", "nextHeatingSetpointSlider", "batteryTile"])
+    }
+    
+    preferences 
+    {
+        input "wakeUpInterval", "number", title: "Wake up interval", description: "Seconds until next wake up notification", range: "60..3600", displayDuringSetup: true
+    }
+}
+
+def parse(String description) 
+{
+    def results = null
+    
+    try
+    {
+       	//log.debug "RAW: $description"
+
+		def cmd = zwave.parse(description) //(description,[0x80: 1, 0x46: 1, 0x81: 1, 0x72: 2, 0x8F: 1, 0x75: 2, 0x43: 2, 0x86: 1, 0x84: 2])
+
+        if (cmd != null)
+        {
+           	//log.debug "CMD: $cmd"
+            results = zwaveEvent(cmd)
+        }
+        
+        if ((state.thermostatModeSet ?: "false") == "false")
+        {
+        	heat()
+        }
+   	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+
+    return results
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.batteryv1.BatteryReport cmd) 
+{
+	def eventList = []
+
+	try
+	{
+		def battery = (state.battery ?: -1)
+
+		if (cmd.batteryLevel != battery)
+		{  
+            if (cmd.batteryLevel == 0xFF) 
+            {  
+                eventList << createEvent(descriptionText: "Device reports low battery", isStateChange: true)
+                log.debug("Device reports low battery (new)")
+                eventList << createEvent(name:"battery", value: 1, unit: "%", displayed: false)
+            } 
+            else 
+            {
+                eventList << createEvent(descriptionText: "Device reports battery at ${cmd.batteryLevel}%", isStateChange: true)    
+                log.debug("Device reports battery at ${cmd.batteryLevel}% (new)")
+
+                eventList << createEvent(name:"battery", value: cmd.batteryLevel, unit: "%", displayed: false)
+                state.battery = cmd.batteryLevel
+            }
+        }
+        else
+        {
+            if (cmd.batteryLevel == 0xFF) 
+            {  
+                log.debug("Device reports low battery (unchanged)")
+            } 
+            else 
+            {
+                log.debug("Device reports battery at ${cmd.batteryLevel}% (unchanged)")
+            }
+        }
+
+        state.lastbatt = new Date().time
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+        
+    eventList
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.thermostatsetpointv2.ThermostatSetpointReport cmd) 
+{
+    def eventList = []
+
+    try
+    {
+        def heatingSetpoint = (state.heatingSetpoint ?: "")
+
+        def value = convertTemperatureIfNeeded(cmd.scaledValue, (cmd.scale == 1 ? "F" : "C"), cmd.precision)
+
+        value = Double.parseDouble(value).toString() - ".0"
+
+        if (heatingSetpoint != value)
+        {
+            eventList << createEvent(name:"heatingSetpoint", value: value, unit: getTemperatureScale(), isStateChange: true, descriptionText: "Device reports thermostat at ${value}°")
+            log.debug("Device reports thermostat at ${value}° (new)")
+
+            state.heatingSetpoint = value;
+
+            state.size = cmd.size
+            state.scale = cmd.scale
+            state.precision = cmd.precision
+        }
+        else
+        {
+            log.debug("Device reports thermostat at ${value}° (unchanged)")
+        }
+  	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+
+    eventList
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpNotification cmd) 
+{
+    def eventList = []
+    
+    try
+    {
+        def delay = 300
+
+        // This try catch block ensures that we allways send the wakeUpNoMoreInformation command
+        try 
+        {
+            log.debug("WakeUpNotification received. Send delay: $delay")
+
+            def heatingSetpoint = (state.heatingSetpoint ?: "")
+            def nextHeatingSetpoint = (state.nextHeatingSetpoint ?: "")
+
+            if (nextHeatingSetpoint != "")
+            {
+                if (heatingSetpoint != nextHeatingSetpoint)
+                {
+                    log.debug("Device is set to ${nextHeatingSetpoint}°")
+
+                    eventList << response(zwave.thermostatSetpointV2.thermostatSetpointSet(setpointType: 1, scale: 0, precision: 1, scaledValue: new BigDecimal(nextHeatingSetpoint)).format())
+                    eventList << response("delay $delay")
+                    eventList << response(zwave.thermostatSetpointV2.thermostatSetpointGet(setpointType: 1).format())
+                    eventList << response("delay $delay")
+                }
+
+                state.nextHeatingSetpoint = ""
+            }
+            else if (heatingSetpoint == "")
+            {
+                log.debug("Requesting thermostat set point")
+                eventList << response(zwave.thermostatSetpointV2.thermostatSetpointGet(setpointType: 1).format())
+                eventList << response("delay $delay")
+            }
+
+            def interval = (wakeUpInterval ?: 60)
+
+            if ((state.configured ?: "false") == "false" ||
+                (state.currentWakeUpInterval ?: 0) != interval)
+            {
+                log.debug("Wake up Interval set to ${interval} seconds")
+
+                eventList << response(zwave.wakeUpV1.wakeUpIntervalSet(seconds:interval, nodeid:zwaveHubNodeId).format())
+                eventList << response("delay $delay")
+
+                state.currentWakeUpInterval = interval
+                state.configured = "true"
+            }
+
+            def battery = (state.battery ?: "")
+
+            if (battery == "")
+            {
+                log.debug("Requesting batery level")
+                eventList << response(zwave.batteryV1.batteryGet())
+                eventList << response("delay $delay")
+            }
+
+            // Set clock once a day
+            def nowTime = new Date().time
+            def ageInMinutes = state.lastClockSet ? (int)(nowTime - state.lastClockSet)/60000 : 1440
+
+            if (ageInMinutes >= 1440) 
+            {
+                def nowCal = Calendar.getInstance(location.timeZone) // get current location timezone
+
+                def weekday = nowCal.get(Calendar.DAY_OF_WEEK)
+                def hour = nowCal.get(Calendar.HOUR_OF_DAY)
+                def minute = nowCal.get(Calendar.MINUTE)
+
+                log.debug "Setting clock to weekday:$weekday hour:$hour minute:$minute"
+
+                eventList << response(zwave.clockV1.clockSet(hour: hour, minute: minute, weekday: weekday).format())
+                eventList << response("delay $delay")
+
+                state.lastClockSet = nowTime
+                state.clock = ""
+            }
+
+            ageInMinutes = 0 // Clock poll every 5 minutes disabled because we are not using it currently
+            //ageInMinutes = state.lastClockGet ? (int)(nowTime - state.lastClockGet)/60000 : 5
+            def clock = state.clock ?: ""
+
+            if (clock == "" ||
+                ageInMinutes >= 5)
+            {
+                eventList << response(zwave.clockV1.clockGet().format())
+                eventList << response("delay $delay")
+
+                state.lastClockGet = nowTime
+            }
+        }
+        catch (Exception ex)
+        {
+            log.error "Exception in WakeUpNotification: $ex"
+        }
+
+        eventList << response(zwave.wakeUpV1.wakeUpNoMoreInformation())
+  	}
+    catch (Exception ex)
+    {
+    	log.error "Exception in WakeUpNotification: $ex"
+    }
+    
+    eventList
+}
+
+def scheduleGet(weekday)
+{
+	def rc = ""
+    
+    if (weekday >= 1 && weekday <= 7)
+    {
+		rc = "4602" + String.format("%02d", weekday)
+    }
+    
+    return rc
+}
+
+def scheduleChangedGet()
+{
+	return "4604"
+}
+
+def scheduleOverrideGet()
+{
+	return "4607"
+}
+
+def scheduleOverrideSet(overrideState, setback)
+{
+	def rc = ""
+    
+    if (([0,1,2,121,122]).contains(overrideState))
+    {
+		rc = "4606" + String.format("%02d", overrideState) + String.format("%02d", setback)
+    }
+    
+    return rc
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.protectionv1.ProtectionReport cmd)
+{
+    try
+    {
+        switch(cmd.localProtectionState)
+        {
+            case physicalgraph.zwave.commands.protectionv1.ProtectionReport.PROTECTION_STATE_UNPROTECTED:
+                log.debug "ProtectionReport: Unprotected"
+                break
+            case physicalgraph.zwave.commands.protectionv1.ProtectionReport.PROTECTION_STATE_PROTECTION_BY_SEQUENCE:
+                log.debug "ProtectionReport: Protection by sequence"
+                break
+            case physicalgraph.zwave.commands.protectionv1.ProtectionReport.PROTECTION_STATE_NO_OPERATION_POSSIBLE:
+                log.debug "ProtectionReport: No operation possible"
+                break
+            default:
+                log.debug "ProtectionReport: Unknown"
+                break
+        }
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.climatecontrolschedulev1.ScheduleOverrideReport cmd)
+{
+    try
+    {
+        switch(cmd.overrideState)
+        {
+            case 0:
+                log.debug "ScheduleOverrideReport: No override"
+                break
+            case 1:
+                log.debug "ScheduleOverrideReport: Temporary override"
+                break
+            case 2:
+                log.debug "ScheduleOverrideReport: Permanent override"
+                break
+            case 121:
+                log.debug "ScheduleOverrideReport: Frost protection"
+                break
+            case 122:
+                log.debug "ScheduleOverrideReport: Energy saving mode"
+                break
+            case 127:
+                log.debug "ScheduleOverrideReport: Unused"
+                break
+            default:
+                log.debug "ScheduleOverrideReport: Unknown"
+                break
+        }
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.climatecontrolschedulev1.ScheduleChangedReport cmd)
+{
+    try
+    {
+        log.debug "ScheduleChangedReport: $cmd"
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.climatecontrolschedulev1.ScheduleReport cmd)
+{
+    try
+    {
+        log.debug "Device schedule received: 1=${cmd.switchpoint1}, 2=${cmd.switchpoint2}, 3=${cmd.switchpoint3}, 4=${cmd.switchpoint4}, 5=${cmd.switchpoint5}, 6=${cmd.switchpoint6}, 7=${cmd.switchpoint7}, 8=${cmd.switchpoint8}, weekday=${cmd.weekday}"
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.clockv1.ClockReport cmd)
+{
+    try
+    {
+        log.debug "Device clock received: weekday:${cmd.weekday} hour:${cmd.hour} minute:${cmd.minute}"
+        state.clock = "${cmd.weekday},${cmd.hour}:${cmd.minute}"
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def zwaveEvent(physicalgraph.zwave.Command cmd)
+{
+    try
+    {
+		log.debug "Catch all: $cmd"
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def setHeatingSetpoint(degrees) 
+{
+    try
+    {
+    	setSetpoint(degrees)
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def setSetpoint(degrees) 
+{
+    try
+    {
+		def deviceScale = (state.scale ?: 2)
+        def deviceScaleString = (deviceScale == 2 ? "C" : "F")
+        def locationScale = getTemperatureScale()
+        def p = (state.precision ?: 1)
+
+        Double convertedDegrees = degrees
+
+        if (locationScale == "C" && 
+            deviceScaleString == "F") 
+        {
+            convertedDegrees = celsiusToFahrenheit(degrees)
+        } 
+        else if (locationScale == "F" && 
+                 deviceScaleString == "C") 
+        {
+            convertedDegrees = fahrenheitToCelsius(degrees)
+        } 
+
+		convertedDegrees = Math.round(convertedDegrees * 10) / 10
+
+		if (convertedDegrees >= 4.0 && convertedDegrees <= 28.0)
+        {
+            def value = convertedDegrees.toString() - ".0"
+	       	sendEvent(name:"nextHeatingSetpoint", value: value, displayed: false , isStateChange: true)
+        	log.debug ("Setting device to ${value}° on next wake up")
+        	state.nextHeatingSetpoint = value
+        }
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def setCoolingSetpoint(degrees)
+{
+    try
+    {
+    	setSetpoint(degrees)
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def off()
+{
+	// Not implemented
+}
+
+def heat()
+{
+    try
+    {
+    	setThermostatMode("heat")
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def emergencyHeat()
+{
+	// Not implemented
+}
+
+def cool()
+{
+    try
+    {
+    	setThermostatMode("cool")
+	}
+    catch (Exception ex)
+    {
+    	log.error "$ex"
+    }
+}
+
+def setThermostatMode(mode)
+{
+	sendEvent(name:"thermostatMode", value: mode, displayed: false)
+	state.thermostatModeSet = "true"
+    log.debug("Thermostat mode is set to '${mode}'")
+}
+
+def fanOn()
+{
+	// Not implemented
+}
+
+def fanAuto()
+{
+	// Not implemented
+}
+
+def fanCirculate()
+{
+	// Not implemented
+}
+
+def setThermostatFanMode(string)
+{
+	// Not implemented
+}
+
+def auto()
+{
+	// Not implemented
+}
